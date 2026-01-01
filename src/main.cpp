@@ -38,7 +38,7 @@ void setup() {
     }
     
     // Set Module Type for dashboard identification
-    brain.setModuleType("air-module-empty");
+    brain.setModuleType("air-quality");
     
     // Example: Registering a status LED as a basic "sensor" or just logging
     brain.log("info", "Module booted successfully");

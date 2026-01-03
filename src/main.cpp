@@ -1,52 +1,114 @@
-/**
- * @file main.cpp
- * @brief Empty Bootstrap for Air Quality Module
- * 
- * Supports MSP32-DevKitC V4.
- * Connects to WiFi/MQTT and enables Over-The-Air (OTA) updates.
- * Ready for sensor integration.
- */
-
 #include <Arduino.h>
 #include <IotMesurable.h>
 #include "pins.h"
+#include <Wire.h>
+#include <SensirionI2CScd4x.h>
+#include <Adafruit_SGP40.h>
 
 // Module ID
-// Change this to a unique name for your device
 #define MODULE_ID "module-air-bootstrap"
 
 IotMesurable brain(MODULE_ID);
+SensirionI2CScd4x scd4x;
+Adafruit_SGP40 sgp40;
+
+// Sensor Data State
+float temperature = 25.0; // Default for compensation
+float humidity = 50.0;    // Default for compensation
+uint16_t co2 = 0;
+int32_t vocIndex = 0;
 
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    
-    Serial.println("\n=== IoT Mesurable - Air Module Bootstrap ===\n");
-    
-    // Configure MQTT Broker from build flags if available
+    Serial.println("\n=== IoT Mesurable - Air Quality Module ===\n");
+
+    // Initialize I2C
+    Wire.begin(PIN_I2C_SDA_MAIN, PIN_I2C_SCL_MAIN);
+
+    // Initialize Connection (WiFi + MQTT)
     #ifdef MQTT_HUB_IP
         brain.setBroker(MQTT_HUB_IP, 1883);
     #endif
 
-    // Initialize Connect
-    // This handles WiFiManager (Portal) AND MQTT connection
     if (!brain.begin()) {
         Serial.println("Failed to initialize connection!");
-        // Blink fast to indicate error
     } else {
         Serial.println("Connected and ready!");
     }
     
-    // Set Module Type for dashboard identification
+    // Set Module Type
     brain.setModuleType("air-quality");
     
-    // Example: Registering a status LED as a basic "sensor" or just logging
-    brain.log("info", "Module booted successfully");
+    // --- Sensor Initialization ---
+    
+    // SCD41
+    scd4x.begin(Wire);
+    uint16_t error;
+    char errorMessage[256];
+    error = scd4x.stopPeriodicMeasurement(); // Stop potentially running measurement
+    if (error) {
+        Serial.print("Error stopping SCD4x: "); errorToString(error, errorMessage, 256); Serial.println(errorMessage);
+    }
+    
+    error = scd4x.startPeriodicMeasurement();
+    if (error) {
+        Serial.print("Error starting SCD4x: "); errorToString(error, errorMessage, 256); Serial.println(errorMessage);
+    } else {
+        brain.registerHardware("scd41", "SCD41");
+        brain.addSensor("scd41", "co2");
+        brain.addSensor("scd41", "temperature");
+        brain.addSensor("scd41", "humidity");
+        Serial.println("SCD41 initialized.");
+    }
+
+    // SGP40
+    if (!sgp40.begin()) {
+        Serial.println("SGP40 not found!");
+    } else {
+        brain.registerHardware("sgp40", "SGP40");
+        brain.addSensor("sgp40", "voc");
+        Serial.println("SGP40 initialized.");
+    }
+
+    brain.log("info", "Module booted with sensors.");
 }
 
+unsigned long lastRead = 0;
+const unsigned long READ_INTERVAL = 1000; // Read sensors every 1s, throttling controls publish rate
+
 void loop() {
-    // REQUIRED: Handle network traffic and system messages
     brain.loop();
     
-    // ... Add your sensor logic here later ...
+    unsigned long now = millis();
+    if (now - lastRead >= READ_INTERVAL) {
+        lastRead = now;
+
+        // --- Read SCD41 ---
+        bool readyStatus = false;
+        uint16_t error = scd4x.getDataReadyFlag(readyStatus);
+        if (!error && readyStatus) {
+            uint16_t scd_co2;
+            float scd_temp, scd_hum;
+            uint16_t error = scd4x.readMeasurement(scd_co2, scd_temp, scd_hum);
+            if (!error) {
+                if (scd_co2 != 0) {
+                    co2 = scd_co2;
+                    temperature = scd_temp;
+                    humidity = scd_hum;
+                    
+                    brain.publish("scd41", "co2", (int)co2);
+                    brain.publish("scd41", "temperature", temperature);
+                    brain.publish("scd41", "humidity", humidity);
+                    Serial.printf("SCD41: CO2=%d ppm, T=%.1f C, RH=%.1f %%\n", co2, temperature, humidity);
+                }
+            }
+        }
+
+        // --- Read SGP40 ---
+        // Use SCD41 temperature/humidity for compensation if available
+        vocIndex = sgp40.measureVocIndex(temperature, humidity);
+        brain.publish("sgp40", "voc", (int)vocIndex);
+        Serial.printf("SGP40: VOC Index=%d\n", vocIndex);
+    }
 }

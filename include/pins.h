@@ -26,6 +26,10 @@
     #define PIN_UART_RX_CO_SC16 14
     #define PIN_UART_TX_CO_SC16 12
 
+    // UART - TPM200A-CO (Carbon Monoxide)
+    #define PIN_UART_RX_TPM200A 16
+    #define PIN_UART_TX_TPM200A 17
+
     // GPIO - DHT22 (Temp/Humidity)
     #define PIN_DHT             4
 

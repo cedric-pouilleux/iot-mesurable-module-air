@@ -11,12 +11,21 @@
 IotMesurable brain(MODULE_ID);
 SensirionI2CScd4x scd4x;
 Adafruit_SGP40 sgp40;
+HardwareSerial tpm200aSerial(2);  // UART2 for TPM200A-CO
 
 // Sensor Data State
 float temperature = 25.0; // Default for compensation
 float humidity = 50.0;    // Default for compensation
 uint16_t co2 = 0;
 int32_t vocIndex = 0;
+float coLevel = 0.0;      // CO level in ppm
+
+// TPM200A-CO Protocol
+const uint8_t TPM200A_HEADER = 0x2C;
+const uint8_t TPM200A_BYTE4 = 0x03;
+const uint8_t TPM200A_BYTE5 = 0xE8;
+uint8_t tpm200aBuffer[6];
+int tpm200aBufferIndex = 0;
 
 void setup() {
     Serial.begin(115200);
@@ -71,6 +80,12 @@ void setup() {
         Serial.println("SGP40 initialized.");
     }
 
+    // TPM200A-CO
+    tpm200aSerial.begin(9600, SERIAL_8N1, PIN_UART_RX_TPM200A, PIN_UART_TX_TPM200A);
+    brain.registerHardware("tpm200a", "TPM200A-CO");
+    brain.addSensor("tpm200a", "co");
+    Serial.println("TPM200A-CO initialized (waiting for data).");
+
     brain.log("info", "Module booted with sensors.");
 }
 
@@ -110,5 +125,53 @@ void loop() {
         vocIndex = sgp40.measureVocIndex(temperature, humidity);
         brain.publish("sgp40", "voc", (int)vocIndex);
         Serial.printf("SGP40: VOC Index=%d\n", vocIndex);
+    }
+    
+    // --- Read TPM200A-CO (UART parsing) ---
+    // Parse UART data continuously (sensor sends data automatically)
+    // but only publish when interval allows
+    while (tpm200aSerial.available()) {
+        uint8_t byte = tpm200aSerial.read();
+        
+        // Look for header
+        if (tpm200aBufferIndex == 0 && byte != TPM200A_HEADER) {
+            continue;  // Skip until we find header
+        }
+        
+        tpm200aBuffer[tpm200aBufferIndex++] = byte;
+        
+        // Once we have 6 bytes, parse the packet
+        if (tpm200aBufferIndex >= 6) {
+            // Validate fixed bytes
+            if (tpm200aBuffer[0] == TPM200A_HEADER && 
+                tpm200aBuffer[3] == TPM200A_BYTE4 && 
+                tpm200aBuffer[4] == TPM200A_BYTE5) {
+                
+                // Calculate checksum (sum of bytes 0-4)
+                uint8_t checksum = 0;
+                for (int i = 0; i < 5; i++) {
+                    checksum += tpm200aBuffer[i];
+                }
+                
+                // Verify checksum
+                if (checksum == tpm200aBuffer[5]) {
+                    // Extract CO level (PPM)
+                    uint16_t ppm = (tpm200aBuffer[1] << 8) | tpm200aBuffer[2];
+                    
+                    // Validate range (0-1000 ppm)
+                    if (ppm <= 1000) {
+                        // Update stored value (always keep latest)
+                        coLevel = (float)ppm;
+                        
+                        // Publish via brain (handles throttling automatically)
+                        // Only publishes if interval has elapsed
+                        brain.publish("tpm200a", "co", coLevel);
+                    }
+                }
+            }
+            
+            // Reset buffer
+            tpm200aBufferIndex = 0;
+        }
     }
 }

@@ -6,7 +6,7 @@
 #include <Adafruit_SGP40.h>
 
 // Module ID
-#define MODULE_ID "module-air-bootstrap"
+#define MODULE_ID "air-quality"
 
 IotMesurable brain(MODULE_ID);
 SensirionI2CScd4x scd4x;
@@ -130,11 +130,23 @@ void loop() {
     // --- Read TPM200A-CO (UART parsing) ---
     // Parse UART data continuously (sensor sends data automatically)
     // but only publish when interval allows
+    static unsigned long lastDebug = 0;
+    if (millis() - lastDebug > 5000) {
+        if (tpm200aSerial.available()) {
+            Serial.printf("[TPM200A DEBUG] UART bytes available: %d\n", tpm200aSerial.available());
+        }
+        lastDebug = millis();
+    }
+    
     while (tpm200aSerial.available()) {
         uint8_t byte = tpm200aSerial.read();
         
+        // Debug: Print received byte
+        Serial.printf("[TPM200A] RX byte: 0x%02X (buffer idx: %d)\n", byte, tpm200aBufferIndex);
+        
         // Look for header
         if (tpm200aBufferIndex == 0 && byte != TPM200A_HEADER) {
+            Serial.printf("[TPM200A] Waiting for header (got 0x%02X, expected 0x%02X)\n", byte, TPM200A_HEADER);
             continue;  // Skip until we find header
         }
         
@@ -142,6 +154,10 @@ void loop() {
         
         // Once we have 6 bytes, parse the packet
         if (tpm200aBufferIndex >= 6) {
+            Serial.printf("[TPM200A] Full packet: %02X %02X %02X %02X %02X %02X\n",
+                         tpm200aBuffer[0], tpm200aBuffer[1], tpm200aBuffer[2],
+                         tpm200aBuffer[3], tpm200aBuffer[4], tpm200aBuffer[5]);
+            
             // Validate fixed bytes
             if (tpm200aBuffer[0] == TPM200A_HEADER && 
                 tpm200aBuffer[3] == TPM200A_BYTE4 && 
@@ -166,8 +182,16 @@ void loop() {
                         // Publish via brain (handles throttling automatically)
                         // Only publishes if interval has elapsed
                         brain.publish("tpm200a", "co", coLevel);
+                        Serial.printf("TPM200A: CO=%.0f ppm\n", coLevel);
+                    } else {
+                        Serial.printf("[TPM200A ERROR] Invalid PPM: %d (> 1000)\n", ppm);
                     }
+                } else {
+                    Serial.printf("[TPM200A ERROR] Checksum mismatch (got 0x%02X, expected 0x%02X)\n", 
+                                tpm200aBuffer[5], checksum);
                 }
+            } else {
+                Serial.printf("[TPM200A ERROR] Invalid packet structure\n");
             }
             
             // Reset buffer

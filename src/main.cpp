@@ -121,10 +121,10 @@ void loop() {
         }
 
         // --- Read SGP40 ---
-        // Use SCD41 temperature/humidity for compensation if available
+        // Use SCD41 temperature and humidity for compensation
         vocIndex = sgp40.measureVocIndex(temperature, humidity);
         brain.publish("sgp40", "voc", (int)vocIndex);
-        Serial.printf("SGP40: VOC Index=%d\n", vocIndex);
+        Serial.printf("SGP40: VOC Index=%d (T=%.1f, H=%.1f)\n", vocIndex, temperature, humidity);
     }
     
     // --- Read TPM200A-CO (UART parsing) ---

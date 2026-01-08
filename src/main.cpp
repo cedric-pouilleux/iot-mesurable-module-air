@@ -4,6 +4,7 @@
 #include <Wire.h>
 #include <SensirionI2CScd4x.h>
 #include <Adafruit_SGP40.h>
+#include <cmath>
 
 // Module ID
 #define MODULE_ID "air-quality"
@@ -20,11 +21,13 @@ uint16_t co2 = 0;
 int32_t vocIndex = 0;
 float coLevel = 0.0;      // CO level in ppm
 
-// TPM200A-CO Protocol
-const uint8_t TPM200A_HEADER = 0x2C;
-const uint8_t TPM200A_BYTE4 = 0x03;
-const uint8_t TPM200A_BYTE5 = 0xE8;
-uint8_t tpm200aBuffer[6];
+// TPM200A-CO Protocol (Proprietary 6-byte format, NOT standard Winsen ZE07-CO)
+// Frame format: [0x2C] [PPM-High] [PPM-Low] [0x03] [0xE8] [Checksum]
+// Bytes 3-4 (0x03E8 = 1000) represent the sensor range (0-1000 ppm)
+// Checksum = sum of bytes 0-4 (simple additive, no complement)
+const uint8_t TPM200A_HEADER = 0x2C;      // Start byte
+const uint8_t TPM200A_FRAME_SIZE = 6;     // 6-byte frame
+uint8_t tpm200aBuffer[8];                 // Buffer with margin
 int tpm200aBufferIndex = 0;
 
 void setup() {
@@ -127,74 +130,55 @@ void loop() {
         Serial.printf("SGP40: VOC Index=%d (T=%.1f, H=%.1f)\n", vocIndex, temperature, humidity);
     }
     
-    // --- Read TPM200A-CO (UART parsing) ---
-    // Parse UART data continuously (sensor sends data automatically)
-    // but only publish when interval allows
-    static unsigned long lastDebug = 0;
-    if (millis() - lastDebug > 5000) {
-        if (tpm200aSerial.available()) {
-            Serial.printf("[TPM200A DEBUG] UART bytes available: %d\n", tpm200aSerial.available());
-        }
-        lastDebug = millis();
-    }
-    
+    // --- Read TPM200A-CO (UART parsing - 6-byte proprietary protocol) ---
+    // Frame format: [0x2C] [PPM-High] [PPM-Low] [0x03] [0xE8] [Checksum]
+    // Sensor auto-uploads data every ~1 second
     while (tpm200aSerial.available()) {
         uint8_t byte = tpm200aSerial.read();
         
-        // Debug: Print received byte
-        Serial.printf("[TPM200A] RX byte: 0x%02X (buffer idx: %d)\n", byte, tpm200aBufferIndex);
-        
-        // Look for header
+        // Look for header byte (0x2C)
         if (tpm200aBufferIndex == 0 && byte != TPM200A_HEADER) {
-            Serial.printf("[TPM200A] Waiting for header (got 0x%02X, expected 0x%02X)\n", byte, TPM200A_HEADER);
-            continue;  // Skip until we find header
+            // Skip bytes until we find the header
+            continue;
+        }
+        
+        // If we see header mid-buffer, it's a new frame - reset and restart
+        if (byte == TPM200A_HEADER && tpm200aBufferIndex > 0) {
+            tpm200aBufferIndex = 0;
         }
         
         tpm200aBuffer[tpm200aBufferIndex++] = byte;
         
-        // Once we have 6 bytes, parse the packet
-        if (tpm200aBufferIndex >= 6) {
-            Serial.printf("[TPM200A] Full packet: %02X %02X %02X %02X %02X %02X\n",
-                         tpm200aBuffer[0], tpm200aBuffer[1], tpm200aBuffer[2],
-                         tpm200aBuffer[3], tpm200aBuffer[4], tpm200aBuffer[5]);
-            
-            // Validate fixed bytes
-            if (tpm200aBuffer[0] == TPM200A_HEADER && 
-                tpm200aBuffer[3] == TPM200A_BYTE4 && 
-                tpm200aBuffer[4] == TPM200A_BYTE5) {
-                
+        // Once we have 6 bytes, parse the complete frame
+        if (tpm200aBufferIndex >= TPM200A_FRAME_SIZE) {
+            // Validate header
+            if (tpm200aBuffer[0] == TPM200A_HEADER) {
                 // Calculate checksum (sum of bytes 0-4)
-                uint8_t checksum = 0;
+                uint8_t calculatedChecksum = 0;
                 for (int i = 0; i < 5; i++) {
-                    checksum += tpm200aBuffer[i];
+                    calculatedChecksum += tpm200aBuffer[i];
                 }
                 
                 // Verify checksum
-                if (checksum == tpm200aBuffer[5]) {
-                    // Extract CO level (PPM)
+                if (calculatedChecksum == tpm200aBuffer[5]) {
+                    // Extract CO concentration (PPM) from bytes 1-2
                     uint16_t ppm = (tpm200aBuffer[1] << 8) | tpm200aBuffer[2];
                     
                     // Validate range (0-1000 ppm)
                     if (ppm <= 1000) {
-                        // Update stored value (always keep latest)
                         coLevel = (float)ppm;
-                        
-                        // Publish via brain (handles throttling automatically)
-                        // Only publishes if interval has elapsed
                         brain.publish("tpm200a", "co", coLevel);
-                        Serial.printf("TPM200A: CO=%.0f ppm\n", coLevel);
+                        Serial.printf("TPM200A: CO=%d ppm\n", ppm);
                     } else {
                         Serial.printf("[TPM200A ERROR] Invalid PPM: %d (> 1000)\n", ppm);
                     }
                 } else {
                     Serial.printf("[TPM200A ERROR] Checksum mismatch (got 0x%02X, expected 0x%02X)\n", 
-                                tpm200aBuffer[5], checksum);
+                                tpm200aBuffer[5], calculatedChecksum);
                 }
-            } else {
-                Serial.printf("[TPM200A ERROR] Invalid packet structure\n");
             }
             
-            // Reset buffer
+            // Reset buffer for next frame
             tpm200aBufferIndex = 0;
         }
     }
